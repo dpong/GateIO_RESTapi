@@ -597,7 +597,7 @@ func localOrderBook(product, symbol string, logger *log.Logger, streamTrade bool
 		}
 	}()
 	// // stream trade
-	tradeErr := make(chan error, 1)
+	//tradeErr := make(chan error, 1)
 	// if streamTrade {
 	// 	var tradeChannel string
 	// 	switch product {
@@ -631,7 +631,7 @@ func localOrderBook(product, symbol string, logger *log.Logger, streamTrade bool
 			case <-ctx.Done():
 				return
 			default:
-				err := o.maintainOrderBook(ctx, product, symbol, streamTrade, &bookticker, &errCh, &orderBookErr, &tradeErr)
+				err := o.maintainOrderBook(ctx, product, symbol, streamTrade, &bookticker, &errCh, &orderBookErr)
 				if err == nil {
 					return
 				}
@@ -643,7 +643,7 @@ func localOrderBook(product, symbol string, logger *log.Logger, streamTrade bool
 	return &o
 }
 
-// default with look back 5 sec, impact range from 0 to 10 levels of the orderbook
+// ex: BTC_USDT
 func SpotLocalOrderBook(symbol string, logger *log.Logger, streamTrade bool) *OrderBookBranch {
 	return localOrderBook("spot", symbol, logger, streamTrade)
 }
@@ -660,7 +660,7 @@ func (o *OrderBookBranch) maintainOrderBook(
 	bookticker *chan map[string]interface{},
 	errCh *chan error,
 	orderBookErr *chan error,
-	tradeErr *chan error,
+	//tradeErr *chan error,
 ) error {
 	var storage []map[string]interface{}
 	var linked bool = false
@@ -684,16 +684,17 @@ func (o *OrderBookBranch) maintainOrderBook(
 		case err := <-snapshotErr:
 			errSend := errors.New("reconnect because of snapshot fail")
 			(*orderBookErr) <- errSend
-			if streamTrade {
-				(*tradeErr) <- errSend
-			}
+			// if streamTrade {
+			// 	(*tradeErr) <- errSend
+			// }
 			return err
+			// check
 		case err := <-o.reCh:
 			errSend := errors.New("reconnect because of reCh send")
 			(*orderBookErr) <- errSend
-			if streamTrade {
-				(*tradeErr) <- errSend
-			}
+			// if streamTrade {
+			// 	(*tradeErr) <- errSend
+			// }
 			return err
 		case message := <-(*bookticker):
 			event, ok := message["e"].(string)
@@ -753,11 +754,12 @@ func (o *OrderBookBranch) maintainOrderBook(
 		default:
 			if time.Now().After(lastUpdate.Add(time.Second * 10)) {
 				// 10 sec without updating
+				// check
 				err := errors.New("reconnect because of time out")
 				(*orderBookErr) <- err
-				if streamTrade {
-					(*tradeErr) <- err
-				}
+				// if streamTrade {
+				// 	(*tradeErr) <- err
+				// }
 				return err
 			}
 			time.Sleep(time.Millisecond * 100)
