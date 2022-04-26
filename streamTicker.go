@@ -205,35 +205,22 @@ func gateTickerSocket(
 		case err := <-*errCh:
 			return err
 		default:
-			if conn == nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
-				message := "GateIo reconnect..."
-				logger.Infoln(message)
-				return errors.New(message)
-			}
 			_, buf, err := conn.ReadMessage()
 			if err != nil {
 				d := w.outGateIoErr()
 				*mainCh <- d
-				message := "GateIo reconnect..."
-				logger.Infoln(message)
-				return errors.New(message)
+				return err
 			}
 			res, err1 := decodingMap(buf, logger)
 			if err1 != nil {
 				d := w.outGateIoErr()
 				*mainCh <- d
-				message := "GateIo reconnect..."
-				logger.Infoln(message, err1)
 				return err1
 			}
 			err2 := w.handleGateIOSocketData(res, mainCh)
 			if err2 != nil {
 				d := w.outGateIoErr()
 				*mainCh <- d
-				message := "GateIo reconnect..."
-				logger.Infoln(message, err2)
 				return err2
 			}
 			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
