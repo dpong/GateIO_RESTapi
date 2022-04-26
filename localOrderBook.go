@@ -91,7 +91,7 @@ func (o *OrderBookBranch) GetOrderBookSnapShot(product, symbol string) error {
 	client := New("", "", "")
 	switch product {
 	case "spot":
-		res, err := client.SpotDepth(symbol)
+		res, err := client.SpotDepth(symbol, 100)
 		if err != nil {
 			return err
 		}
@@ -737,7 +737,7 @@ func (o *OrderBookBranch) maintainOrderBook(
 				// update last update
 				lastUpdate = time.Now()
 			default:
-				st := FormatingTimeStamp(message["T"].(float64))
+				st := formatingTimeStamp(message["T"].(float64))
 				price, _ := decimal.NewFromString(message["p"].(string))
 				size, _ := decimal.NewFromString(message["q"].(string))
 				// is the buyer the mm
@@ -885,7 +885,7 @@ func (o *OrderBookBranch) SwapUpdateJudge(message *map[string]interface{}, linke
 	return nil
 }
 
-func DecodingMap(message []byte, logger *log.Logger) (res map[string]interface{}, err error) {
+func decodingMap(message []byte, logger *log.Logger) (res map[string]interface{}, err error) {
 	if message == nil {
 		err = errors.New("the incoming message is nil")
 		return nil, err
@@ -920,7 +920,7 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 	if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 		return err
 	}
-	if err := w.SubscribeTo(channel, symbol); err != nil {
+	if err := w.subscribeTo(channel, symbol); err != nil {
 		return err
 	}
 	w.Conn.SetPingHandler(nil)
@@ -932,7 +932,7 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 			return err
 		default:
 			if w.Conn == nil {
-				d := w.OutGateIErr()
+				d := w.outGateIoErr()
 				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
@@ -940,23 +940,23 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 			}
 			_, buf, err := conn.ReadMessage()
 			if err != nil {
-				d := w.OutGateIErr()
+				d := w.outGateIoErr()
 				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
-			res, err1 := DecodingMap(buf, logger)
+			res, err1 := decodingMap(buf, logger)
 			if err1 != nil {
-				d := w.OutGateIErr()
+				d := w.outGateIoErr()
 				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
-			err2 := w.HandleGateIOSocketData(res, mainCh)
+			err2 := w.handleGateIOSocketData(res, mainCh)
 			if err2 != nil {
-				d := w.OutGateIErr()
+				d := w.outGateIoErr()
 				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
@@ -969,12 +969,14 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 	}
 }
 
-func (w *wS) SubscribeTo(channel, symbol string) error {
+func (w *wS) subscribeTo(channel, symbol string) error {
 	t := time.Now().Unix()
 	payload := []string{symbol}
 	switch channel {
 	case "spot.order_book_update":
 		payload = append(payload, "100ms")
+	case "spot.book_ticker":
+		// pass
 	}
 	orderBookMsg := NewMsg(channel, "subscribe", t, payload)
 	err := orderBookMsg.send(w.Conn)
@@ -984,7 +986,7 @@ func (w *wS) SubscribeTo(channel, symbol string) error {
 	return nil
 }
 
-func (w *wS) HandleGateIOSocketData(res map[string]interface{}, mainCh *chan map[string]interface{}) error {
+func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map[string]interface{}) error {
 	channel, ok := res["channel"].(string)
 	if !ok {
 		return nil
@@ -993,7 +995,7 @@ func (w *wS) HandleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 	case "spot.order_book_update":
 		result, ok := res["result"].(map[string]interface{})
 		if !ok {
-			m := w.OutGateIErr()
+			m := w.outGateIoErr()
 			*mainCh <- m
 			return errors.New("get nil when getting result")
 		}
@@ -1004,13 +1006,13 @@ func (w *wS) HandleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 		switch event {
 		case "depthUpdate":
 			if st, ok := result["E"].(float64); !ok {
-				m := w.OutGateIErr()
+				m := w.outGateIoErr()
 				*mainCh <- m
 				return errors.New("got nil when updating event time")
 			} else {
 				stamp := time.Unix(int64(st), 0)
 				if time.Now().After(stamp.Add(time.Second * 5)) {
-					m := w.OutGateIErr()
+					m := w.outGateIoErr()
 					*mainCh <- m
 					return errors.New("websocket data delay more than 5 sec")
 				}
@@ -1020,24 +1022,54 @@ func (w *wS) HandleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 			headID := decimal.NewFromFloat(firstId)
 			tailID := decimal.NewFromFloat(lastId)
 			if headID.LessThan(w.LastUpdatedId) {
-				m := w.OutGateIErr()
+				m := w.outGateIoErr()
 				*mainCh <- m
 				return errors.New("got error when updating lastUpdateId")
 			}
 			w.LastUpdatedId = tailID
 			*mainCh <- result
 		}
+	case "spot.book_ticker":
+		event, ok := res["event"].(string)
+		if !ok {
+			return nil
+		}
+		switch event {
+		case "update":
+			result, ok := res["result"].(map[string]interface{})
+			if !ok {
+				m := w.outGateIoErr()
+				*mainCh <- m
+				return errors.New("get nil when getting result")
+			}
+			if st, ok := result["t"].(float64); !ok {
+				m := w.outGateIoErr()
+				*mainCh <- m
+
+				return errors.New("got nil when updating event time")
+			} else {
+				stamp := time.Unix(int64(st), 0)
+				if time.Now().After(stamp.Add(time.Second * 5)) {
+					m := w.outGateIoErr()
+					*mainCh <- m
+					return errors.New("websocket data delay more than 5 sec")
+				}
+			}
+			*mainCh <- result
+		default:
+			// pass
+		}
 	}
 	return nil
 }
 
-func (w *wS) OutGateIErr() map[string]interface{} {
+func (w *wS) outGateIoErr() map[string]interface{} {
 	w.OnErr = true
 	m := make(map[string]interface{})
 	return m
 }
 
-func FormatingTimeStamp(timeFloat float64) time.Time {
+func formatingTimeStamp(timeFloat float64) time.Time {
 	t := time.Unix(int64(timeFloat/1000), 0)
 	return t
 }

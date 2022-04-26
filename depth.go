@@ -6,15 +6,18 @@ import (
 
 type SpotDepthOpts struct {
 	Symbol string `url:"currency_pair"`
-	Limit  int    `url:"limit"`
-	WithID bool   `url:"with_id"`
+	Limit  int    `url:"limit,omitempty"`
+	WithID bool   `url:"with_id,omitempty"`
 }
 
 // symbol ex: BTC_USDT
-func (b *Client) SpotDepth(symbol string) (*SpotDepth, error) {
+func (b *Client) SpotDepth(symbol string, level int) (*SpotDepth, error) {
+	if level < 1 {
+		level = 1
+	}
 	opts := SpotDepthOpts{
 		Symbol: symbol,
-		Limit:  100,
+		Limit:  level,
 		WithID: true,
 	}
 	res, err := b.do("spot", http.MethodGet, "spot/order_book", opts, false, false)
