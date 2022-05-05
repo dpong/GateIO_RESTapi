@@ -171,7 +171,7 @@ func gateTickerSocket(
 	errCh *chan error,
 ) error {
 	var w wS
-	var duration time.Duration = 30
+	var duration time.Duration = 300
 	w.Logger = logger
 	w.OnErr = false
 	var url string
