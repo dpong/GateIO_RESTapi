@@ -23,6 +23,7 @@ type tobBranch struct {
 	mux   sync.RWMutex
 	price string
 	qty   string
+	ts    time.Time
 }
 
 // func SwapStreamTicker(symbol string, logger *log.Logger) *StreamTickerBranch {
@@ -41,7 +42,7 @@ func localStreamTicker(product, symbol string, logger *log.Logger) *StreamTicker
 	ticker := make(chan map[string]interface{}, 50)
 	errCh := make(chan error, 5)
 	// initial data with rest api first
-	s.initialWithSpotDetail(product, symbol)
+	//s.initialWithSpotDetail(product, symbol)
 	go func() {
 		for {
 			select {
@@ -64,8 +65,6 @@ func localStreamTicker(product, symbol string, logger *log.Logger) *StreamTicker
 			default:
 				if err := s.maintainStreamTicker(ctx, product, symbol, &ticker, &errCh); err == nil {
 					return
-				} else {
-					logger.Warningf("Refreshing %s %s ticker stream with err: %s\n", symbol, product, err.Error())
 				}
 			}
 		}
@@ -83,40 +82,44 @@ func (s *StreamTickerBranch) Close() {
 	s.ask.mux.Unlock()
 }
 
-func (s *StreamTickerBranch) GetBid() (price, qty string, ok bool) {
+func (s *StreamTickerBranch) GetBid() (price, qty string, timeStamp time.Time, ok bool) {
 	s.bid.mux.RLock()
 	defer s.bid.mux.RUnlock()
 	price = s.bid.price
 	qty = s.bid.qty
 	if price == NullPrice || price == "" {
-		return price, qty, false
+		return price, qty, timeStamp, false
 	}
-	return price, qty, true
+	timeStamp = s.bid.ts
+	return price, qty, timeStamp, true
 }
 
-func (s *StreamTickerBranch) GetAsk() (price, qty string, ok bool) {
+func (s *StreamTickerBranch) GetAsk() (price, qty string, timeStamp time.Time, ok bool) {
 	s.ask.mux.RLock()
 	defer s.ask.mux.RUnlock()
 	price = s.ask.price
 	qty = s.ask.qty
 	if price == NullPrice || price == "" {
-		return price, qty, false
+		return price, qty, timeStamp, false
 	}
-	return price, qty, true
+	timeStamp = s.ask.ts
+	return price, qty, timeStamp, true
 }
 
-func (s *StreamTickerBranch) updateBidData(price, qty string) {
+func (s *StreamTickerBranch) updateBidData(price, qty string, timeStamp time.Time) {
 	s.bid.mux.Lock()
 	defer s.bid.mux.Unlock()
 	s.bid.price = price
 	s.bid.qty = qty
+	s.bid.ts = timeStamp
 }
 
-func (s *StreamTickerBranch) updateAskData(price, qty string) {
+func (s *StreamTickerBranch) updateAskData(price, qty string, timeStamp time.Time) {
 	s.ask.mux.Lock()
 	defer s.ask.mux.Unlock()
 	s.ask.price = price
 	s.ask.qty = qty
+	s.ask.ts = timeStamp
 }
 
 func (s *StreamTickerBranch) maintainStreamTicker(
@@ -125,7 +128,6 @@ func (s *StreamTickerBranch) maintainStreamTicker(
 	ticker *chan map[string]interface{},
 	errCh *chan error,
 ) error {
-	lastUpdate := time.Now()
 	for {
 		select {
 		case <-ctx.Done():
@@ -148,17 +150,13 @@ func (s *StreamTickerBranch) maintainStreamTicker(
 			if askqty, ok := message["A"].(string); ok {
 				askQty = askqty
 			}
-			s.updateBidData(bidPrice, bidQty)
-			s.updateAskData(askPrice, askQty)
-			lastUpdate = time.Now()
-		default:
-			if time.Now().After(lastUpdate.Add(time.Second * 300)) {
-				// 60 sec without updating
-				err := errors.New("reconnect because of time out")
-				*errCh <- err
-				return err
+
+			var timeStamp time.Time
+			if ts, ok := message["t"].(float64); ok {
+				timeStamp = time.UnixMilli(int64(ts))
 			}
-			time.Sleep(time.Millisecond * 100)
+			s.updateBidData(bidPrice, bidQty, timeStamp)
+			s.updateAskData(askPrice, askQty, timeStamp)
 		}
 	}
 }
@@ -171,9 +169,9 @@ func gateTickerSocket(
 	errCh *chan error,
 ) error {
 	var w wS
-	var duration time.Duration = 300
-	w.Logger = logger
-	w.OnErr = false
+	var duration time.Duration = 30
+	innerErr := make(chan string, 1)
+	w.logger = logger
 	var url string
 	switch product {
 	case "spot":
@@ -183,69 +181,96 @@ func gateTickerSocket(
 	default:
 		return errors.New("not supported product, cancel socket connection")
 	}
-	conn, _, err := websocket.DefaultDialer.Dial(url, nil)
+	dailCtx, _ := context.WithDeadline(ctx, time.Now().Add(time.Second*5))
+	conn, _, err := websocket.DefaultDialer.DialContext(dailCtx, url, nil)
 	if err != nil {
 		return err
 	}
 	logger.Infof("Gate.io %s %s %s socket connected.\n", symbol, product, channel)
-	w.Conn = conn
+	w.conn = conn
 	defer conn.Close()
 	err = w.subscribeTo(channel, symbol)
 	if err != nil {
 		return err
 	}
-	if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+	if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 		return err
 	}
-	w.Conn.SetPingHandler(nil)
+	// ping pong part
+	go func() {
+		ping := time.NewTicker(time.Second * 20)
+		defer ping.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-innerErr:
+				return
+			case <-ping.C:
+				if err := w.getPingPong(); err != nil {
+					w.conn.SetReadDeadline(time.Now().Add(time.Millisecond * 5))
+				}
+			}
+		}
+	}()
+	w.conn.SetPingHandler(nil)
 	for {
 		select {
 		case <-ctx.Done():
 			return nil
 		case err := <-*errCh:
+			innerErr <- "restart"
 			return err
 		default:
-			_, buf, err := conn.ReadMessage()
+			_, buf, err := w.conn.ReadMessage()
 			if err != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
+				innerErr <- "restart"
 				return err
 			}
 			res, err1 := decodingMap(buf, logger)
 			if err1 != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
+				innerErr <- "restart"
 				return err1
 			}
 			err2 := w.handleGateIOSocketData(res, mainCh)
 			if err2 != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
+				innerErr <- "restart"
 				return err2
 			}
-			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+			if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+				innerErr <- "restart"
 				return err
 			}
 		}
 	}
 }
 
-func (s *StreamTickerBranch) initialWithSpotDetail(product, symbol string) error {
-	switch product {
-	case "spot":
-		client := New("", "", "")
-		res, err := client.SpotDepth(symbol, 1)
-		if err != nil {
-			return err
-		}
-		// 0 => price, 1 => qty
-		s.updateBidData(res.Bids[0][0], res.Bids[0][1])
-		s.updateAskData(res.Asks[0][0], res.Asks[0][1])
-	case "swap":
-		//
-	default:
-		return errors.New("not supported product to initial spot detail")
-	}
+// func (s *StreamTickerBranch) initialWithSpotDetail(product, symbol string) error {
+// 	switch product {
+// 	case "spot":
+// 		client := New("", "", "")
+// 		res, err := client.SpotDepth(symbol, 1)
+// 		if err != nil {
+// 			return err
+// 		}
+// 		// 0 => price, 1 => qty
+// 		s.updateBidData(res.Bids[0][0], res.Bids[0][1])
+// 		s.updateAskData(res.Asks[0][0], res.Asks[0][1])
+// 	case "swap":
+// 		//
+// 	default:
+// 		return errors.New("not supported product to initial spot detail")
+// 	}
 
+// 	return nil
+// }
+
+func (w *wS) getPingPong() error {
+	t := time.Now().Unix()
+	pingMsg := NewMsg("spot.ping", "", t, []string{})
+	err := pingMsg.send(w.conn)
+	if err != nil {
+		return err
+	}
 	return nil
 }

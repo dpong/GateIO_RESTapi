@@ -56,11 +56,10 @@ type bookMicro struct {
 }
 
 type wS struct {
-	Channel       string
-	OnErr         bool
-	Logger        *log.Logger
-	Conn          *websocket.Conn
-	LastUpdatedId decimal.Decimal
+	channel       string
+	logger        *log.Logger
+	conn          *websocket.Conn
+	lastUpdatedId decimal.Decimal
 }
 
 func (o *OrderBookBranch) UpdateLastUpdateId(id decimal.Decimal) {
@@ -737,7 +736,7 @@ func (o *OrderBookBranch) maintainOrderBook(
 				// update last update
 				lastUpdate = time.Now()
 			default:
-				st := formatingTimeStamp(message["T"].(float64))
+				st := time.UnixMilli(int64(message["T"].(float64)))
 				price, _ := decimal.NewFromString(message["p"].(string))
 				size, _ := decimal.NewFromString(message["q"].(string))
 				// is the buyer the mm
@@ -900,9 +899,8 @@ func decodingMap(message []byte, logger *log.Logger) (res map[string]interface{}
 func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *log.Logger, mainCh *chan map[string]interface{}, reCh *chan error) error {
 	var w wS
 	var duration time.Duration = 300
-	w.Channel = channel
-	w.Logger = logger
-	w.OnErr = false
+	w.channel = channel
+	w.logger = logger
 	var url string
 	switch product {
 	case "spot":
@@ -915,15 +913,15 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 		return err
 	}
 	logger.Infof("Gate.io %s %s %s socket connected.\n", symbol, product, channel)
-	w.Conn = conn
+	w.conn = conn
 	defer conn.Close()
-	if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+	if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 		return err
 	}
 	if err := w.subscribeTo(channel, symbol); err != nil {
 		return err
 	}
-	w.Conn.SetPingHandler(nil)
+	w.conn.SetPingHandler(nil)
 	for {
 		select {
 		case <-ctx.Done():
@@ -931,38 +929,30 @@ func gateIOSocket(ctx context.Context, product, symbol, channel string, logger *
 		case err := <-(*reCh):
 			return err
 		default:
-			if w.Conn == nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
+			if w.conn == nil {
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
-			_, buf, err := conn.ReadMessage()
+			_, buf, err := w.conn.ReadMessage()
 			if err != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
 			res, err1 := decodingMap(buf, logger)
 			if err1 != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
 			err2 := w.handleGateIOSocketData(res, mainCh)
 			if err2 != nil {
-				d := w.outGateIoErr()
-				*mainCh <- d
 				message := "Gate.io reconnect..."
 				logger.Infoln(message)
 				return errors.New(message)
 			}
-			if err := w.Conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
+			if err := w.conn.SetReadDeadline(time.Now().Add(time.Second * duration)); err != nil {
 				return err
 			}
 		}
@@ -979,7 +969,7 @@ func (w *wS) subscribeTo(channel, symbol string) error {
 		// pass
 	}
 	orderBookMsg := NewMsg(channel, "subscribe", t, payload)
-	err := orderBookMsg.send(w.Conn)
+	err := orderBookMsg.send(w.conn)
 	if err != nil {
 		return err
 	}
@@ -995,8 +985,6 @@ func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 	case "spot.order_book_update":
 		result, ok := res["result"].(map[string]interface{})
 		if !ok {
-			m := w.outGateIoErr()
-			*mainCh <- m
 			return errors.New("get nil when getting result")
 		}
 		event, ok := result["e"].(string)
@@ -1006,14 +994,10 @@ func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 		switch event {
 		case "depthUpdate":
 			if st, ok := result["E"].(float64); !ok {
-				m := w.outGateIoErr()
-				*mainCh <- m
 				return errors.New("got nil when updating event time")
 			} else {
 				stamp := time.Unix(int64(st), 0)
 				if time.Now().After(stamp.Add(time.Second * 5)) {
-					m := w.outGateIoErr()
-					*mainCh <- m
 					return errors.New("websocket data delay more than 5 sec")
 				}
 			}
@@ -1021,12 +1005,10 @@ func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 			lastId := result["u"].(float64)
 			headID := decimal.NewFromFloat(firstId)
 			tailID := decimal.NewFromFloat(lastId)
-			if headID.LessThan(w.LastUpdatedId) {
-				m := w.outGateIoErr()
-				*mainCh <- m
+			if headID.LessThan(w.lastUpdatedId) {
 				return errors.New("got error when updating lastUpdateId")
 			}
-			w.LastUpdatedId = tailID
+			w.lastUpdatedId = tailID
 			*mainCh <- result
 		}
 	case "spot.book_ticker":
@@ -1038,20 +1020,13 @@ func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 		case "update":
 			result, ok := res["result"].(map[string]interface{})
 			if !ok {
-				m := w.outGateIoErr()
-				*mainCh <- m
 				return errors.New("get nil when getting result")
 			}
 			if st, ok := result["t"].(float64); !ok {
-				m := w.outGateIoErr()
-				*mainCh <- m
-
 				return errors.New("got nil when updating event time")
 			} else {
 				stamp := time.Unix(int64(st), 0)
 				if time.Now().After(stamp.Add(time.Second * 5)) {
-					m := w.outGateIoErr()
-					*mainCh <- m
 					return errors.New("websocket data delay more than 5 sec")
 				}
 			}
@@ -1061,15 +1036,4 @@ func (w *wS) handleGateIOSocketData(res map[string]interface{}, mainCh *chan map
 		}
 	}
 	return nil
-}
-
-func (w *wS) outGateIoErr() map[string]interface{} {
-	w.OnErr = true
-	m := make(map[string]interface{})
-	return m
-}
-
-func formatingTimeStamp(timeFloat float64) time.Time {
-	t := time.Unix(int64(timeFloat/1000), 0)
-	return t
 }
