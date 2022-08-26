@@ -30,7 +30,7 @@ type tobBranch struct {
 // 	return localStreamTicker("swap", symbol, logger)
 // }
 
-// ex: symbol = btcusdt
+// ex: symbol = BTC_USDT
 func SpotStreamTicker(symbol string, logger *log.Logger) *StreamTickerBranch {
 	return localStreamTicker("spot", symbol, logger)
 }
